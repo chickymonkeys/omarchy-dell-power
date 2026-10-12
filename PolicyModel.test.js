@@ -425,6 +425,22 @@ test("automation selects configured source pair, independent of manual preferenc
   assert.equal(result.state.lastSource, "ac");
   assert.equal(Object.prototype.hasOwnProperty.call(result, "preferences"), false);
 });
+test("source edge corrects a stale CPU even when daemon and Dell labels match", () => {
+  const data = input({
+    settings: { saverEnabled: false, automationEnabled: true },
+    actual: { ppd: "balanced", dell: "balanced", controllers: [{ name: "SoC Power Slider", profile: "performance" }] },
+  });
+  const result = Model.evaluate(data, { lastSource: "ac" });
+  assert.deepEqual(result.actions, [{kind: "profile", ppd: "balanced", dell: "balanced", policy: "automation"}]);
+  noActions(data, result.state);
+});
+test("a matching CPU leaves a matching source pair untouched", () => {
+  const data = input({
+    settings: { saverEnabled: false, automationEnabled: true },
+    actual: { ppd: "balanced", dell: "balanced", controllers: [{ name: "SoC Power Slider", profile: "balanced" }] },
+  });
+  noActions(data, { lastSource: "ac" });
+});
 test("unchanged source never continuously reasserts an automation selection", () => {
   const data = input({
     settings: { saverEnabled: false, automationEnabled: true },

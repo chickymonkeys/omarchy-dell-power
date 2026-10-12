@@ -73,8 +73,8 @@ def prepare(directory, fixture="shell.qml"):
     fixture_status['brightness'] = 500
     fixture_status['brightnessMax'] = 1000
     (root / 'status.json').write_text(json.dumps(fixture_status))
-    (root / 'flags.json').write_text(json.dumps({'actions': fixture in ('actions.qml', 'ui.qml'), 'isolated-ownership': fixture.startswith('ipc')}))
-    if fixture == 'actions.qml' or fixture.startswith('ipc'):
+    (root / 'flags.json').write_text(json.dumps({'actions': fixture in ('actions.qml', 'ui.qml', 'automation.qml'), 'isolated-ownership': fixture.startswith('ipc'), 'source-automation': fixture == 'automation.qml'}))
+    if fixture in ('actions.qml', 'automation.qml') or fixture.startswith('ipc'):
         (plugin / 'state.py').rename(plugin / 'real_state.py')
         shutil.copy2(ROOT / 'tests/qml/bridge.py', plugin / 'state.py')
         shutil.copy2(ROOT / 'tests/qml/control.py', root / 'fixture-control.py')
@@ -103,6 +103,11 @@ def prepare(directory, fixture="shell.qml"):
     controller.write_text(text)
     for name in ('home', 'state', 'config', 'cache', 'runtime'):
         (root / name).mkdir(mode=0o700)
+    if fixture == 'automation.qml':
+        snapshot = root / 'state/dell-power/snapshots.json'
+        snapshot.parent.mkdir(mode=0o700)
+        snapshot.write_text(json.dumps({'version': 1, 'policySnapshots': {}, 'policyState': {'episode': False, 'lastSource': 'ac', 'suspended': {'profile': False, 'brightness': False}}}))
+        snapshot.chmod(0o600)
     if fixture == 'ipc-stale.qml':
         config = root / 'home/.config/omarchy/shell.json'
         config.parent.mkdir(parents=True)
@@ -137,7 +142,7 @@ def run_fixture(fixture):
         errors = [line for line in output.splitlines() if re.search(r'(TypeError|ReferenceError|ASSERTION FAILED|Cannot assign|Unable to assign|Duplicate IPC|Handler was registered but will not be used|Binding loop)', line)]
         commands = [json.loads(line) for line in (root / 'commands.jsonl').read_text().splitlines()]
         allowed = {'status', 'status-live', 'sensors', 'power-chain', 'battery-info', 'profile-list'}
-        if fixture == 'actions.qml':
+        if fixture in ('actions.qml', 'automation.qml'):
             allowed |= {'charge-protect', 'charge-mode', 'charge-restore', 'profile', 'profile-owned', 'profile-owned-state', 'profile-restore-state', 'brightness-owned', 'brightness-restore'}
         forbidden = [item for item in commands if item['operation'] not in allowed]
         if evidence['failed'] or errors or forbidden:
@@ -153,6 +158,12 @@ def run_fixture(fixture):
             for operation in ('sensors', 'power-chain'):
                 assert sum(item['operation'] == operation for item in commands) == 1, operation + ' must have one shared initial sample'
             assert saved['protectionSnapshot']['before']['mode'] == 'Standard'
+        elif fixture == 'automation.qml':
+            mutations = [item for item in commands if item['operation'] not in {'status', 'status-live', 'battery-info', 'profile-list'}]
+            assert [m['args'][1:3] for m in mutations] == [['balanced', 'balanced'], ['cool', 'power-saver'], ['performance', 'performance'], ['balanced', 'balanced'], ['performance', 'performance']], 'startup, source edges and configuration each apply once'
+            assert [m['operation'] for m in mutations] == ['profile-owned-state', 'profile-owned-state', 'profile', 'profile-owned-state', 'profile-owned-state'], 'automation uses fresh controller ownership guards'
+            assert (root / 'state/omarchy/powerprofiles/battery').read_text().strip() == 'performance', 'ordinary manual preference remains persistent'
+            assert saved['policySnapshots'] == {}, 'source automation does not claim saver restoration snapshots'
         else:
             mutations = [item for item in commands if item['operation'] not in {'status', 'status-live', 'battery-info', 'profile-list'}]
             assert sum(item['operation'] == 'charge-protect' for item in mutations) == 1, 'failed preflight must not reach helper'
@@ -329,6 +340,7 @@ def run_ipc_fixture(fixture="ipc.qml"):
 def main():
     run_fixture('shell.qml')
     run_fixture('actions.qml')
+    run_fixture('automation.qml')
     run_ui_fixture()
     run_ipc_fixture()
     run_ipc_fixture('ipc-stale.qml')

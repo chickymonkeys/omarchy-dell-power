@@ -335,12 +335,22 @@ class Hardware:
             return {"available": False, "profile": None, "choices": []}
 
     def set_ppd(self, profile):
-        if profile not in PPD or profile not in self.ppd()["choices"]:
+        before = self.ppd()
+        if profile not in PPD or profile not in before["choices"]:
             raise Refused("System profile unavailable")
+        shared = (self.read(self.path("/sys/firmware/acpi/platform_profile_choices")) or "").split()
+        if (profile == "power-saver" and before["profile"] == "performance"
+                and "balanced" in before["choices"] and "balanced" in shared
+                and "low-power" not in shared):
+            # On PPD 0.30 the unsupported low-power fallback emits a Balanced
+            # notification, undoing Performance -> Power Saver. Settle that
+            # shared mode first, then select the requested daemon profile.
+            self.run(["/usr/bin/powerprofilesctl", "set", "balanced"])
+            self.verify(lambda: self.ppd()["profile"] == "balanced")
         self.run(["/usr/bin/powerprofilesctl", "set", profile])
         self.verify(lambda: self.ppd()["profile"] == profile)
 
-    def verify_ppd_controllers(self, profile):
+    def sync_cpu_profile(self, profile):
         expected = {
             "power-saver": "low-power",
             "balanced": "balanced",
@@ -355,13 +365,14 @@ class Hardware:
         ]
         if any(expected not in c["choices"] for c in relevant):
             raise Refused("PPD controller does not advertise requested profile")
-        # PPD reaches the individual layers through the kernel's aggregate
-        # platform_profile, which offers only the modes every layer shares.
-        # Without the mapped mode there (e.g. dell-pc has no low-power)
-        # PPD leaves the CPU layer as it was, so there is nothing to await.
-        shared = self.read(self.path("/sys/firmware/acpi/platform_profile_choices"))
-        if shared is not None and expected not in shared.split():
-            return
+        # PPD may report a new profile without updating this layer. Its
+        # aggregate interface lacks some modes and its cached fallback can
+        # suppress even shared-mode writes after a Dell-only selection.
+        # Complete the requested, advertised CPU mode in this transaction.
+        for c in relevant:
+            path = self.controller_path(c)
+            if self.read(path) != expected:
+                self.write(path, expected)
         self.verify(
             lambda: all(
                 self.read(self.controller_path(c)) == expected for c in relevant
@@ -376,7 +387,8 @@ class Hardware:
             or profile not in controller["choices"]
         ):
             raise Refused("Dell thermal mode unavailable")
-        self.write(self.controller_path(controller), profile)
+        if controller["profile"] != profile:
+            self.write(self.controller_path(controller), profile)
         self.verify(lambda: self.read(self.controller_path(controller)) == profile)
 
     def hwmons(self):
@@ -911,8 +923,9 @@ class Controller:
                 rollback = restore_profiles
                 started = True
                 if ppd != "none":
-                    hw.set_ppd(ppd)
-                    hw.verify_ppd_controllers(ppd)
+                    if old_ppd != ppd:
+                        hw.set_ppd(ppd)
+                    hw.sync_cpu_profile(ppd)
                 hw.set_thermal(dell)
                 if restore_state:
                     for c, value in zip(controllers, saved["controllers"]):
@@ -930,7 +943,7 @@ class Controller:
                     )
                 )
                 if ppd != "none" and not restore_state:
-                    hw.verify_ppd_controllers(ppd)
+                    hw.sync_cpu_profile(ppd)
             elif command in {"usb-power-share", "type-c-power"}:
                 attr = "UsbPowerShare" if command == "usb-power-share" else "TypeCPower"
                 allowed = (

@@ -140,10 +140,16 @@ Item {
     acceptCanonical(Logic.canonical(config.bar, pluginId))
   }
   function acceptCanonical(canonical) {
+    var previousDefaults = JSON.stringify([settings.automationEnabled, settings.acProfile, settings.batteryProfile])
     var keys = Object.keys(pendingSettings)
     var acknowledged = keys.every(function(key) { return JSON.stringify(canonical[key]) === JSON.stringify(pendingSettings[key]) })
     if (acknowledged) pendingSettings = ({})
     settings = Object.assign({}, canonical, pendingSettings)
+    if (loaded && settings.automationEnabled && previousDefaults !== JSON.stringify([settings.automationEnabled, settings.acProfile, settings.batteryProfile])) {
+      policiesArmed = true
+      policyState = Object.assign({}, policyState, {lastSource: ""})
+      evaluatePolicies()
+    }
   }
   function writeSettings(next) {
     if (shell) shell.updateEntryInline(pluginId, next)
@@ -209,6 +215,11 @@ Item {
     if (action.meta.manualProfile || action.meta.manualBrightness) {
       policyState = Policy.noteManual(policyState, action.meta.manualProfile ? "profile" : "brightness")
       persist()
+    }
+    if (action.meta.policy === "automation") {
+      // A source change must not overwrite a selection made after the last
+      // poll. The helper compares every individual controller before writing.
+      action.args = ["profile-owned-state", action.args[1], action.args[2], JSON.stringify(Logic.profileState(status))]
     }
     if (action.meta.fallback) {
       fallbackProfileProc.command = ["/usr/bin/timeout", "-k", "5", "15", "/usr/share/omarchy/bin/omarchy-powerprofiles-set", action.meta.source, action.meta.remember]
@@ -374,7 +385,7 @@ Item {
     }
     var d = UPower.displayDevice
     var caps = Object.assign({}, status.capabilities, {dellProfiles: status.thermal ? status.thermal.choices : [], ppdProfiles: status.ppd.choices})
-    var actual = {ppd: status.ppd.profile, dell: status.thermal ? status.thermal.profile : null,
+    var actual = {ppd: status.ppd.profile, dell: status.thermal ? status.thermal.profile : null, controllers: status.controllers,
       brightness: status.brightnessMax ? status.brightness / status.brightnessMax * 100 : null}
     var snapshots = Object.assign({}, policySnapshots)
     if (!busy && !queue.length && policyState.episode && snapshots.profile
@@ -468,6 +479,12 @@ Item {
         policyState = s.policyState || policyState
       }
       ownership = data.ownership || ownership; loaded = true
+      // An already enabled source policy must apply on a new desktop session,
+      // even when the persisted lastSource happens to match this boot's source.
+      if (settings.automationEnabled) {
+        policiesArmed = true
+        policyState = Object.assign({}, policyState, {lastSource: ""})
+      }
       refresh()
     } else if (bridgeOperation === "ownership") { ownership = data.ownership; evaluatePolicies() }
     else if (bridgeOperation === "save" && preparedAction && activeSaveText === preparedStateText) {
@@ -494,13 +511,17 @@ Item {
     function togglePercentage(): void { root.setSetting("showPercentage", !root.settings.showPercentage) }
     function features(): void { root.panelCommand("openFeatures") }
     function setFeature(name: string, enabled: bool, visible: bool): void { root.setFeature(name, enabled, visible) }
+    function setProfile(profile: string): void { root.setProfile(profile) }
+    function setThermalProfile(profile: string): void { root.setThermalProfile(profile) }
+    function configureSourceProfile(source: string, ppd: string, dell: string): void { root.configureSourceProfile(source, ppd, dell) }
     function diagnostics(): string {
       return JSON.stringify({loaded: root.loaded, probed: root.probed, helperCompatible: root.helperCompatible,
         busy: root.busy, queueLength: root.queue.length, panelCount: Object.keys(root.panels).length,
         anyOpen: root.anyOpen, samplingSensors: root.samplingSensors, samplingFlow: root.samplingFlow,
         sensorSamples: root.sensorSamples, flowSamples: root.flowSamples, fans: root.fans, temps: root.temps,
         powerChain: root.powerChain, settings: root.settings, status: root.status, ownership: root.ownership,
-        policyReason: root.policyReason, error: root.error})
+        policyReason: root.policyReason, policyState: root.policyState, onBattery: UPower.onBattery,
+        policiesArmed: root.policiesArmed, error: root.error})
     }
   }
   function panelCommand(command) {

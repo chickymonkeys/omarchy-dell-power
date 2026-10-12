@@ -171,7 +171,7 @@ elif operation in {
         if operation == "profile-owned-state":
             if not profile_state_matches(json.loads(args[3])):
                 fail("Fixture controller ownership changed")
-            if not saved or not saved.get("policySnapshots", {}).get("profile"):
+            if not flags.get("source-automation") and (not saved or not saved.get("policySnapshots", {}).get("profile")):
                 fail("Saver snapshot was not durably saved")
         apply_profile(args[1], args[2])
     elif operation == "profile-restore-state":

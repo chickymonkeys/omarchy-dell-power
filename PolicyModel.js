@@ -55,6 +55,14 @@ function samePair(left, right) {
   return validPair(left) && validPair(right) && left.ppd === right.ppd && left.dell === right.dell;
 }
 
+function cpuMatches(actual, ppd) {
+  if (!Array.isArray(actual.controllers)) return true;
+  var expected = ppd === "power-saver" ? "low-power" : ppd;
+  return actual.controllers.every(function (c) {
+    return ["SoC Power Slider", "intel_pstate", "amd_pstate"].indexOf(c.name) < 0 || c.profile === expected;
+  });
+}
+
 function supportedPair(pair, capabilities) {
   return (
     validPair(pair) &&
@@ -210,7 +218,7 @@ function evaluate(input, previous) {
     if (!supportedPair(pair, capabilities))
       return result("The " + source + " profile pair is missing or unsupported.");
     state.lastSource = source;
-    if (!samePair(actual, pair))
+    if (!samePair(actual, pair) || !cpuMatches(actual, pair.ppd))
       actions.push({
         kind: "profile",
         ppd: pair.ppd,

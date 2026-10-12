@@ -70,6 +70,10 @@ The wrapper fetches the installer core and the publisher manifest (`SHA256SUMS`)
 
 Versions up to 1.5.0 also installed `dell-power-state.service`, which cached the root-only Alienware BIOS settings at boot. The helper now reads them on demand, so the installer disables and removes that service.
 
+On machines such as the DA14260, the daemon can report a new profile while its cached aggregate interface leaves the CPU controller unchanged. The aggregate may also lack Low Power. Linked transactions therefore apply and verify the CPU's advertised mode (Low Power, Balanced or Performance) through its named controller when necessary, then verify the Dell thermal mode. With an aggregate interface lacking Low Power, Performance → Power Saver first settles Balanced to avoid power-profiles-daemon 0.30 reverting the requested profile. Failed readback rolls back the system profile and every individual controller.
+
+Setting transactions record their start, result and before/after state in the system journal (`journalctl -t dell-power`). Read-only polling and power-flow samples do not produce these records. A missing record before an abrupt power loss cannot exclude a firmware problem; BIOS event logs remain separate evidence.
+
 Reads of thresholds and battery state need no privilege. Writes, and the power-flow sampling (RAPL counters are root-only by kernel default), run through `sudo -n /usr/local/bin/dell-charge-limit …`, which needs no password thanks to the narrow sudoers rule (the helper itself refuses everything outside its hardcoded allowlist). If the sudoers rule is missing, _writes_ fall back to `pkexec`, which asks for the password via the Omarchy polkit agent; the power-flow readout stays hidden instead.
 
 ## Updating

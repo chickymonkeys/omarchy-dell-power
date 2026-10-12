@@ -24,7 +24,7 @@ try:
         raise ValueError("Fixture snapshot save failed")
     if operation == "remember" and flags.get("fail-remember"):
         raise ValueError("Fixture preference save failed")
-    if flags.get("isolated-ownership") and operation in {"load", "ownership"}:
+    if (flags.get("isolated-ownership") or flags.get("source-automation")) and operation in {"load", "ownership"}:
         result = {
             "ok": True,
             "ownership": {
@@ -37,6 +37,8 @@ try:
             result["state"] = module.read_private(
                 Path(os.environ["XDG_STATE_HOME"]) / "dell-power/snapshots.json"
             )
+        if flags.get("source-automation"):
+            result["ownership"] = {"known": True, "conflict": False, "reason": ""}
     else:
         result = module.main(sys.argv[1:])
 except (ValueError, OSError) as error:

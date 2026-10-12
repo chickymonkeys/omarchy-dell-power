@@ -51,6 +51,7 @@ class FixtureHardware(backend.Hardware):
         self.ppd_profile = "balanced"
         self.ppd_available = True
         self.ppd_propagates = True
+        self.ppd_fallback_bounce = False
         self.native_choices = NATIVE
         super().__init__(
             root=root,
@@ -144,13 +145,14 @@ class FixtureHardware(backend.Hardware):
             fault = self.effect(None, args[2], command="ppd")
             if fault and fault["effect"] == "skip":
                 return ""
-            self.ppd_profile = args[2]
+            bounced = self.ppd_fallback_bounce and self.ppd_profile == "performance" and args[2] == "power-saver"
+            self.ppd_profile = "balanced" if bounced else args[2]
             if self.ppd_propagates:
                 target = {
                     "power-saver": "low-power",
                     "balanced": "balanced",
                     "performance": "performance",
-                }[args[2]]
+                }[self.ppd_profile]
                 for controller in self.controllers():
                     if target in controller["choices"]:
                         put(
@@ -790,19 +792,18 @@ class ProfileTests(FixtureCase):
         )
         self.assertEqual(self.hw.read(self.root / self.dell / "profile"), "cool")
 
-    def test_stale_soc_controller_refuses_despite_successful_daemon_selection(self):
+    def test_stale_soc_controller_is_corrected_after_daemon_selection(self):
         put(self.root, self.intel + "/name", "SoC Power Slider")
         self.hw.ppd_propagates = False
         result = self.controller.execute(["profile", "quiet", "power-saver"])
-        self.failure(result, True, True)
-        self.assertEqual(self.hw.ppd_profile, "balanced")
+        self.success(result)
+        self.assertEqual(self.hw.ppd_profile, "power-saver")
         self.assertEqual(
-            self.hw.read(self.root / self.intel / "profile"), "performance"
+            self.hw.read(self.root / self.intel / "profile"), "low-power"
         )
-        self.assertEqual(self.hw.read(self.root / self.dell / "profile"), "cool")
-        self.assertNotIn(("write", self.dell + "/profile", "quiet"), self.writes())
+        self.assertEqual(self.hw.read(self.root / self.dell / "profile"), "quiet")
 
-    def test_soc_layer_outside_shared_profiles_is_not_awaited(self):
+    def test_soc_layer_outside_shared_profiles_is_applied_and_verified(self):
         # dell-pc lacks low-power, so the aggregate cannot carry PPD power-saver to the SoC slider.
         put(self.root, self.intel + "/name", "SoC Power Slider")
         put(self.root, self.intel + "/choices", "low-power balanced performance")
@@ -817,17 +818,100 @@ class ProfileTests(FixtureCase):
         self.success(result)
         self.assertEqual(self.hw.ppd_profile, "power-saver")
         self.assertEqual(
-            self.hw.read(self.root / self.intel / "profile"), "performance"
+            self.hw.read(self.root / self.intel / "profile"), "low-power"
         )
         self.assertEqual(result["actual"]["thermal"]["profile"], "quiet")
-        # A shared mode is still awaited on the same machine.
+        self.assertIn(("write", self.intel + "/profile", "low-power"), self.writes())
+        # A shared mode can also be stale after an independent Dell selection.
         put(self.root, self.intel + "/profile", "balanced")
         result = self.controller.execute(["profile", "performance", "performance"])
+        self.success(result)
+        self.assertEqual(self.hw.read(self.root / self.intel / "profile"), "performance")
+
+    def test_return_to_ac_corrects_balanced_even_when_daemon_cached_that_mode(self):
+        put(self.root, self.intel + "/name", "SoC Power Slider")
+        put(self.root, self.intel + "/profile", "low-power")
+        put(self.root, self.dell + "/choices", "cool quiet balanced performance")
+        put(self.root, "sys/firmware/acpi/platform_profile_choices", "balanced performance")
+        self.hw.ppd_profile = "power-saver"
+        self.hw.ppd_propagates = False
+        result = self.controller.execute(["profile", "balanced", "balanced"])
+        self.success(result)
+        self.assertEqual(result["actual"]["ppd"]["profile"], "balanced")
+        self.assertEqual(result["actual"]["controllers"][0]["profile"], "balanced")
+        self.assertEqual(result["actual"]["thermal"]["profile"], "balanced")
+
+    def test_performance_to_saver_without_shared_lowpower_settles_balanced_first(self):
+        put(self.root, self.intel + "/name", "SoC Power Slider")
+        put(self.root, self.intel + "/choices", "low-power balanced performance")
+        put(self.root, self.dell + "/choices", "cool quiet balanced performance")
+        put(self.root, self.dell + "/profile", "performance")
+        put(self.root, "sys/firmware/acpi/platform_profile_choices", "balanced performance")
+        self.hw.ppd_profile = "performance"
+        self.hw.ppd_fallback_bounce = True
+        result = self.controller.execute(["profile", "quiet", "power-saver"])
+        self.success(result)
+        setters = [e[1][-1] for e in self.hw.events if e[0] == "run" and "set" in e[1]]
+        self.assertEqual(setters, ["balanced", "power-saver"])
+        self.assertEqual(result["actual"]["ppd"]["profile"], "power-saver")
+        self.assertEqual(result["actual"]["controllers"][0]["profile"], "low-power")
+        self.assertEqual(result["actual"]["thermal"]["profile"], "quiet")
+
+    def test_failed_intermediate_balanced_selection_restores_performance(self):
+        put(self.root, "sys/firmware/acpi/platform_profile_choices", "balanced performance")
+        self.hw.ppd_profile = "performance"
+        self.hw.fault(value="balanced", command="ppd", effect="skip")
+        result = self.controller.execute(["profile", "quiet", "power-saver"])
         self.failure(result, True, True)
+        self.assertEqual(self.hw.ppd_profile, "performance")
+        self.assertEqual(self.hw.read(self.root / self.intel / "profile"), "performance")
+        self.assertEqual(self.hw.read(self.root / self.dell / "profile"), "cool")
+
+    def test_shared_cpu_write_failure_rolls_back_before_changing_dell_mode(self):
+        put(self.root, self.intel + "/profile", "low-power")
+        self.hw.ppd_propagates = False
+        self.hw.fault(self.intel + "/profile", "performance", effect="skip")
+        result = self.controller.execute(["profile", "performance", "performance"])
+        self.failure(result, True, True)
+        self.assertEqual(self.hw.ppd_profile, "balanced")
+        self.assertEqual(self.hw.read(self.root / self.intel / "profile"), "low-power")
+        self.assertEqual(self.hw.read(self.root / self.dell / "profile"), "cool")
+
+    def test_unshared_cpu_write_failure_rolls_back_every_controller(self):
+        put(self.root, self.intel + "/name", "SoC Power Slider")
+        put(self.root, self.intel + "/choices", "low-power balanced performance")
+        put(self.root, self.dell + "/choices", "cool quiet balanced performance")
+        put(self.root, "sys/firmware/acpi/platform_profile_choices", "balanced performance")
+        self.hw.ppd_propagates = False
+        self.hw.fault(self.intel + "/profile", "low-power", effect="skip")
+        result = self.controller.execute(["profile", "quiet", "power-saver"])
+        self.failure(result, True, True)
+        self.assertEqual(self.hw.ppd_profile, "balanced")
+        self.assertEqual(self.hw.read(self.root / self.intel / "profile"), "performance")
+        self.assertEqual(self.hw.read(self.root / self.dell / "profile"), "cool")
+        self.assertNotIn(("write", self.dell + "/profile", "quiet"), self.writes())
+
+    def test_dell_only_same_mode_does_not_repeat_firmware_write(self):
+        self.success(self.controller.execute(["profile", "cool", "none"]))
+        self.assertEqual(self.writes(), [])
+
+    def test_same_daemon_profile_does_not_reapply_global_thermal_mode(self):
+        put(self.root, self.intel + "/profile", "balanced")
+        self.success(self.controller.execute(["profile", "cool", "balanced"]))
+        self.assertEqual(self.writes(), [])
+        self.assertFalse(any(e[0] == "run" and "set" in e[1] for e in self.hw.events))
+
+    def test_same_daemon_profile_corrects_stale_cpu_without_global_reapply(self):
+        put(self.root, self.intel + "/profile", "low-power")
+        self.success(self.controller.execute(["profile", "cool", "balanced"]))
+        self.assertEqual(self.hw.read(self.root / self.intel / "profile"), "balanced")
+        self.assertEqual(self.writes(), [("write", self.intel + "/profile", "balanced")])
+        self.assertFalse(any(e[0] == "run" and "set" in e[1] for e in self.hw.events))
 
     def test_soc_readback_converges_before_dell_mutation(self):
         put(self.root, self.intel + "/name", "SoC Power Slider")
         self.hw.ppd_propagates = False
+        self.hw.fault(self.intel + "/profile", "low-power", effect="skip")
 
         def delayed_cpu(seconds):
             if self.hw.clock >= 0.2:
